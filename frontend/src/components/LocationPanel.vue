@@ -29,6 +29,36 @@
     </div>
     <div v-if="error" class="warnbox bad" style="margin-top:8px">{{ error }}</div>
 
+    <div class="excl-panel">
+      <div class="row" style="justify-content:space-between">
+        <h3 style="margin:0">本次定位使用的 {{ phase }} 到时 —— 勾选即本次不用</h3>
+        <div class="row" style="gap:6px">
+          <span class="tag good">纳入 {{ exclCounts.included }}</span>
+          <span class="tag warn">排除 {{ exclCounts.excluded }}</span>
+          <span class="tag missing">缺测 {{ exclCounts.missing }}</span>
+          <button v-if="exclCounts.excluded" class="sm" @click="$emit('clear-excludes')">全部纳入</button>
+        </div>
+      </div>
+      <div class="muted" style="margin:2px 0 6px">
+        排除只影响本次运行并记录在候选解快照里，<b>不会修改 raw / manual 拾取</b>；缺测到时本就不参与，无需排除。
+      </div>
+      <div class="excl-grid">
+        <label v-for="p in phasePicks" :key="p.id" class="excl-item"
+               :class="{excluded: isExcluded(p.id), missing: p.effective_source==='missing'}">
+          <input type="checkbox" :checked="isExcluded(p.id)"
+                 :disabled="p.effective_source==='missing'"
+                 @change="$emit('toggle-exclude', p.id)" />
+          <span class="mono" style="font-weight:650">{{ p.station_code }}</span>
+          <span class="mono">{{ p.effective_time_epoch ? fmtEpoch(p.effective_time_epoch,3).slice(11) : '— 缺测 —' }}</span>
+          <span class="tag" :class="p.effective_source">{{ sourceLabel[p.effective_source] }}</span>
+        </label>
+      </div>
+      <div v-if="exclCounts.included < 4" class="warnbox bad" style="margin-top:6px">
+        排除后仅剩 {{ exclCounts.included }} 个有效 {{ phase }} 到时，少于 4 个未知量所需的最低 4 个
+        —— 本次运行将明确「不可定位」，不会输出坐标。
+      </div>
+    </div>
+
     <div v-if="selectedModel" style="margin-top:8px">
       <h3>{{ selectedModel.name }} 的明确假设</h3>
       <ul class="muted" style="margin:2px; padding-left:18px">
@@ -58,6 +88,8 @@
             <td>
               <span v-if="!r.locatable" class="tag bad">不可定位</span>
               <span v-else class="tag good">已定位</span>
+              <span v-if="r.n_excluded" class="tag warn" title="本次运行排除的拾取数（见详情快照）">
+                排除{{ r.n_excluded }}站</span>
             </td>
             <td class="mono">{{ r.lon?.toFixed(4) ?? '—' }}</td>
             <td class="mono">{{ r.lat?.toFixed(4) ?? '—' }}</td>
@@ -79,6 +111,13 @@
     <div v-if="currentPickVersion && run.pick_data_version!==currentPickVersion" class="warnbox">
       该候选解基于旧版拾取数据（哈希 {{ run.pick_data_version }}）计算，当前拾取已被修订为
       {{ currentPickVersion }}。旧结果保留用于对比，但请重新运行定位以获得可复算的当前解。
+    </div>
+
+    <div v-if="excludedSnapshot.length" class="warnbox">
+      本次运行排除了 {{ excludedSnapshot.length }} 个拾取：
+      <b v-for="(s,i) in excludedSnapshot" :key="s.pick_id" class="mono">
+        {{ i?'、':'' }}{{ s.station_code }}·{{ s.phase }}</b>
+      （仅影响本次运行，raw / manual 拾取未改动；快照中标记为「用户排除」）。
     </div>
 
     <div v-if="!run.locatable" class="notlocatable">
@@ -196,10 +235,13 @@ const props = defineProps({
   selectedRun: Object,
   scenarioKey: String,
   currentPickVersion: String,
+  picks: { type: Array, default: () => [] },
+  excludedIds: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['located', 'select', 'refresh-runs'])
+const emit = defineEmits(['located', 'select', 'refresh-runs', 'toggle-exclude', 'clear-excludes'])
 
-const phase = ref('P')
+// 震相选择提升到 App（地图/到时表要按同一震相显示三态），此处用 v-model:phase 双向绑定
+const phase = defineModel('phase', { type: String, default: 'P' })
 const modelId = ref('homog-crust-6.0-3.46-v1')
 const robust = ref(false)
 const busy = ref(false)
@@ -208,16 +250,37 @@ const error = ref('')
 const run = computed(() => props.selectedRun)
 const selectedModel = computed(() => props.models.find(m => m.model_id === modelId.value))
 
+// —— 本次运行的排除选择（仅当前震相；缺测到时本就不参与，不可勾选）——
+const sourceLabel = { raw: '原始', manual: '人工', missing: '缺测' }
+const phasePicks = computed(() =>
+  props.picks.filter(p => p.phase === phase.value)
+    .slice().sort((a, b) => a.station_code.localeCompare(b.station_code)))
+const isExcluded = (id) => props.excludedIds.includes(id)
+const exclCounts = computed(() => {
+  let included = 0, excluded = 0, missing = 0
+  for (const p of phasePicks.value) {
+    if (p.effective_source === 'missing') missing++
+    else if (isExcluded(p.id)) excluded++
+    else included++
+  }
+  return { included, excluded, missing }
+})
+const excludedSnapshot = computed(() =>
+  (run.value?.input_snapshot || []).filter(s => s.excluded))
+
 async function doLocate() {
   busy.value = true
   error.value = ''
   try {
+    // 只发送当前震相的排除 ID（后端会核对 ID 属于本案例本震相，不符即拒绝）
+    const phaseIds = new Set(phasePicks.value.map(p => p.id))
     const created = await api.locate({
       scenario_key: props.scenarioKey,
       phase: phase.value,
       model_id: modelId.value,
       robust: robust.value,
       label: '',
+      exclude_pick_ids: props.excludedIds.filter(id => phaseIds.has(id)),
     })
     emit('located', created)
   } catch (e) {

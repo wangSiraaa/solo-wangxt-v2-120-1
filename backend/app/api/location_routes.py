@@ -37,19 +37,31 @@ def run_locate(req: LocateRequest, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
+    # —— 排除列表核对：每个 ID 都必须存在、且属于本案例的当前震相，否则整单拒绝。
+    #    排除只影响本次运行，不写回 picks 表（raw/manual 均不改动）。——
+    excluded = sorted(set(req.exclude_pick_ids))
+    if excluded:
+        ex_rows = {p.id: p for p in db.scalars(select(Pick).where(Pick.id.in_(excluded)))}
+        unknown = [i for i in excluded if i not in ex_rows]
+        if unknown:
+            raise HTTPException(400, f"要排除的拾取 ID 不存在：{unknown}")
+        foreign = [f"#{p.id}({p.station.code}/{p.phase})"
+                   for p in ex_rows.values()
+                   if p.scenario_id != sc.id or p.phase != phase]
+        if foreign:
+            raise HTTPException(
+                400,
+                f"排除的拾取不属于案例 {req.scenario_key!r} 的 {phase} 震相，已拒绝：{foreign}",
+            )
+
     # —— 严格单一震相：只查询该震相的拾取，P/S 物理上不可能混入 ——
     rows = list(db.scalars(select(Pick).where(
         Pick.scenario_id == sc.id, Pick.phase == phase)))
 
     arrivals: List[Arrival] = []
     snapshot = []
-    excluded = list(req.exclude_pick_ids)
-    rejected_mix: list[str] = []  # 该震相表本就不会含别的震相；这里保留显式校验
     for p in rows:
         eff, source = _effective_pick(p)
-        if p.phase != phase:
-            rejected_mix.append(p.station.code)
-            continue
         rec = {
             "pick_id": p.id, "station_code": p.station.code, "phase": p.phase,
             "effective_time_epoch": eff, "time_source": source,
@@ -63,9 +75,6 @@ def run_locate(req: LocateRequest, db: Session = Depends(get_db)):
             time_epoch=eff, pick_id=p.id, time_source=source,
         ))
 
-    if rejected_mix:
-        raise HTTPException(400, f"检测到异震相拾取混入，已拒绝：{rejected_mix}")
-
     result = locate(
         arrivals, phase=phase, model=model, robust=req.robust,
         truth={
@@ -75,9 +84,12 @@ def run_locate(req: LocateRequest, db: Session = Depends(get_db)):
     )
     pv = picks_version(req.scenario_key, db)
 
+    auto_label = f"{phase} {'稳健' if req.robust else 'OLS'} {model.model_id.split('-v')[0]}"
+    if excluded:
+        auto_label += f" 排除{len(excluded)}站"
     run = LocationRun(
         scenario_id=sc.id,
-        label=req.label or f"{phase} {'稳健' if req.robust else 'OLS'} {model.model_id.split('-v')[0]}",
+        label=req.label or auto_label,
         phase=phase, model_id=model.model_id, robust=req.robust,
         locatable=result.locatable, status=result.status, reason=result.reason,
         lon=result.lon, lat=result.lat, depth_km=result.depth_km,
@@ -130,7 +142,7 @@ def _summary(run: LocationRun) -> RunSummary:
     return RunSummary(
         id=run.id, label=run.label, phase=run.phase, model_id=run.model_id,
         robust=run.robust, locatable=run.locatable, status=run.status, reason=run.reason,
-        n_used=n_used, dof=max(n_used - 4, 0),
+        n_used=n_used, dof=max(n_used - 4, 0), n_excluded=len(run.excludes or []),
         lon=run.lon, lat=run.lat, depth_km=run.depth_km,
         origin_time_epoch=run.origin_time_epoch, rms_s=run.rms_s,
         max_abs_residual_s=run.max_abs_residual_s,

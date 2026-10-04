@@ -23,6 +23,7 @@ SciPy 做 Geiger 最小二乘拟合，PostgreSQL/PostGIS（开发时可回退 SQ
 | 离群到时案例 | outlier：S04 的 P 自动拾取人为 +2.5s，S06 的 S 缺测 |
 | 台站几乎共线案例 | collinear：6 台沿 NE-SW 走廊（L06 偏离仅 0.2 km），特征值比 >60000，误差椭圆沿弱方向拉长 |
 | 原始拾取与人工修订分开 | `picks.raw_*` 只读、永不修改；`manual_*` 独立字段，可撤销；波形上点击放置修订 |
+| 单次运行排除可疑拾取 | 定位面板按当前震相列出各台站有效到时，可勾选「本次不用」；地图/到时表区分纳入/排除/缺测三态；后端核对排除 ID 属于本案例本震相，候选解快照记录选择；只影响本次运行，不动 raw/manual |
 | 结果绑定模型与数据版本 | 每次运行记录 model_id、data_version、pick_schema_version、app_version，以及拾取内容哈希 `pick_data_version` 和完整输入快照 |
 | 重算可解释 | 修订拾取后哈希变化，旧候选标记「过期」并保留对比；快照可逐拾取复盘 |
 
@@ -72,7 +73,7 @@ GET  /api/scenarios/{key}/picks/version         # 拾取内容哈希（修订即
 PATCH /api/scenarios/picks/{id}                 # 写入人工修订（不动 raw）
 DELETE /api/scenarios/picks/{id}/manual         # 撤销修订
 GET  /api/scenarios/{key}/waveforms/{station}   # ObsPy 读 MiniSEED，降采样返回
-POST /api/scenarios/locate                      # 单震相定位，保存候选解（含快照/版本）
+POST /api/scenarios/locate                      # 单震相定位，保存候选解（含快照/版本）；exclude_pick_ids 仅本次排除指定拾取（须属本案例本震相）
 GET  /api/scenarios/{key}/runs  /api/scenarios/runs/{id}
 DELETE /api/scenarios/runs/{id}
 ```

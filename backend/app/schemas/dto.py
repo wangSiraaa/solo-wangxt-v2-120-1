@@ -85,6 +85,7 @@ class RunSummary(BaseModel):
     reason: Optional[str]
     n_used: int
     dof: int
+    n_excluded: int = 0  # 本次运行排除的拾取数（仅影响该次运行，不改拾取数据）
     lon: Optional[float]
     lat: Optional[float]
     depth_km: Optional[float]

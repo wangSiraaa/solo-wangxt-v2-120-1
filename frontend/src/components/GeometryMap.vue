@@ -6,7 +6,9 @@
         <span class="tag good">绿★ 真值</span>
         <span class="tag" :class="selectedRun ? 'warn' : ''">橙◆ 所选候选</span>
         <span class="tag raw">灰◇ 其他候选</span>
-        <span class="tag P">▼ 台站</span>
+        <span class="tag P">▼ 纳入({{ phase }})</span>
+        <span class="tag warn">▽ 排除</span>
+        <span class="tag raw">▽ 缺测</span>
       </div>
     </div>
     <div ref="mapEl" style="height: 420px"></div>
@@ -44,12 +46,23 @@ const props = defineProps({
   scenario: Object,
   runs: { type: Array, default: () => [] },
   selectedRun: Object,
+  picks: { type: Array, default: () => [] },
+  phase: { type: String, default: 'P' },
+  excludedIds: { type: Array, default: () => [] },
 })
 const mapEl = ref(null)
 const gapText = { good: '包围良好', one_sided: '单侧覆盖', poor: '严重单侧' }
 
 onMounted(redraw)
-watch(() => [props.stations, props.runs, props.selectedRun], redraw, { deep: true })
+watch(() => [props.stations, props.runs, props.selectedRun, props.picks,
+             props.phase, props.excludedIds], redraw, { deep: true })
+
+// 台站在当前震相下的定位状态：纳入 / 排除（仅本次运行）/ 缺测
+function stationState(code) {
+  const p = props.picks.find(pk => pk.station_code === code && pk.phase === props.phase)
+  if (!p || p.effective_source === 'missing') return 'missing'
+  return props.excludedIds.includes(p.id) ? 'excluded' : 'included'
+}
 
 function ellipseLonLat(run) {
   const u = run.uncertainty
@@ -72,16 +85,32 @@ function redraw() {
   if (!mapEl.value) return
   const traces = []
 
-  // 台站
-  traces.push({
-    x: props.stations.map(s => s.lon),
-    y: props.stations.map(s => s.lat),
-    text: props.stations.map(s => s.code),
-    type: 'scatter', mode: 'markers+text',
-    marker: { symbol: 'triangle-down', size: 11, color: '#f85149' },
-    textposition: 'top center', textfont: { size: 10, color: '#f85149' },
-    name: '台站', hovertemplate: '%{text}<br>(%{x:.4f}, %{y:.4f})<extra></extra>',
-  })
+  // 台站：按当前震相的定位状态分三条轨迹（纳入/排除/缺测）
+  const groups = { included: [], excluded: [], missing: [] }
+  for (const s of props.stations) groups[stationState(s.code)].push(s)
+  const staStyle = {
+    included: { name: `纳入(${props.phase})`, symbol: 'triangle-down', size: 11,
+                color: '#f85149' },
+    excluded: { name: '排除（本次不用）', symbol: 'triangle-down-open', size: 13,
+                color: '#d29922' },
+    missing:  { name: '缺测', symbol: 'triangle-down-open', size: 11,
+                color: '#8b949e' },
+  }
+  for (const [state, list] of Object.entries(groups)) {
+    if (!list.length) continue
+    const st = staStyle[state]
+    traces.push({
+      x: list.map(s => s.lon),
+      y: list.map(s => s.lat),
+      text: list.map(s => s.code),
+      type: 'scatter', mode: 'markers+text',
+      marker: { symbol: st.symbol, size: st.size, color: st.color,
+                ...(state === 'included' ? {} : { line: { color: st.color, width: 2 } }) },
+      textposition: 'top center', textfont: { size: 10, color: st.color },
+      name: st.name,
+      hovertemplate: `%{text}（${st.name}）<br>(%{x:.4f}, %{y:.4f})<extra></extra>`,
+    })
+  }
 
   // 真值
   if (props.scenario) {
