@@ -41,9 +41,32 @@ def run_locate(req: LocateRequest, db: Session = Depends(get_db)):
     rows = list(db.scalars(select(Pick).where(
         Pick.scenario_id == sc.id, Pick.phase == phase)))
 
+    # 排除只影响本次运行：exclude_pick_ids 中的每一条都必须确实属于
+    # **当前案例 + 当前震相**。其他案例/震相的拾取 ID、或不存在的 ID
+    # 一律拒绝（防止前端串数据或手工构造请求误排除）。
+    excluded = list(dict.fromkeys(req.exclude_pick_ids))  # 去重保序
+    if excluded:
+        valid_ids = {p.id for p in rows}
+        not_found = [i for i in excluded if i not in valid_ids]
+        if not_found:
+            foreign = list(db.scalars(
+                select(Pick).where(Pick.id.in_(not_found))))
+            details = []
+            for fp in foreign:
+                fsc = fp.scenario.key if fp.scenario else f"scenario#{fp.scenario_id}"
+                details.append(
+                    f"pick#{fp.id}（{fp.station.code} {fp.phase}，属于案例 {fsc}）"
+                )
+            unknown = [i for i in not_found if not any(fp.id == i for fp in foreign)]
+            details.extend(f"pick#{i}（不存在）" for i in unknown)
+            raise HTTPException(
+                400,
+                f"以下拾取不属于当前案例 {req.scenario_key!r} 的 {phase} 震相，"
+                f"不能在本次定位中排除：{'；'.join(details)}",
+            )
+
     arrivals: List[Arrival] = []
     snapshot = []
-    excluded = list(req.exclude_pick_ids)
     rejected_mix: list[str] = []  # 该震相表本就不会含别的震相；这里保留显式校验
     for p in rows:
         eff, source = _effective_pick(p)
@@ -77,7 +100,10 @@ def run_locate(req: LocateRequest, db: Session = Depends(get_db)):
 
     run = LocationRun(
         scenario_id=sc.id,
-        label=req.label or f"{phase} {'稳健' if req.robust else 'OLS'} {model.model_id.split('-v')[0]}",
+        label=req.label or (
+            f"{phase} {'稳健' if req.robust else 'OLS'} {model.model_id.split('-v')[0]}"
+            + (f" 排除{len(excluded)}" if excluded else "")
+        ),
         phase=phase, model_id=model.model_id, robust=req.robust,
         locatable=result.locatable, status=result.status, reason=result.reason,
         lon=result.lon, lat=result.lat, depth_km=result.depth_km,
@@ -127,10 +153,11 @@ def delete_run(run_id: int, db: Session = Depends(get_db)):
 def _summary(run: LocationRun) -> RunSummary:
     n_used = sum(1 for s in run.input_snapshot
                  if s.get("effective_time_epoch") is not None and not s.get("excluded"))
+    n_excluded = sum(1 for s in run.input_snapshot if s.get("excluded"))
     return RunSummary(
         id=run.id, label=run.label, phase=run.phase, model_id=run.model_id,
         robust=run.robust, locatable=run.locatable, status=run.status, reason=run.reason,
-        n_used=n_used, dof=max(n_used - 4, 0),
+        n_used=n_used, n_excluded=n_excluded, dof=max(n_used - 4, 0),
         lon=run.lon, lat=run.lat, depth_km=run.depth_km,
         origin_time_epoch=run.origin_time_epoch, rms_s=run.rms_s,
         max_abs_residual_s=run.max_abs_residual_s,

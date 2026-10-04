@@ -4,19 +4,24 @@
     <div class="muted" style="margin-bottom:6px">
       raw 为自动拾取（合成发生器按固定种子生成，只读）；manual 为人工修订。
       定位始终使用 COALESCE(manual, raw)，缺测台站自动剔除。「对真值偏差」仅供教学对照。
+      勾选排除在「定位求解」面板进行；下表末列按当前定位震相（{{ locatePhase }} 波）标注
+      <span class="tag good">纳入</span> / <span class="tag excluded">本次排除</span> /
+      <span class="tag missing">缺测</span> 三种状态，排除只影响本次运行，不改任何拾取。
     </div>
     <div class="scroll">
       <table>
         <thead>
           <tr>
             <th>台站</th><th>震相</th><th>原始到时(UTC)</th><th>raw−真值(s)</th>
-            <th>状态</th><th>人工修订(UTC)</th><th>man−真值(s)</th><th>来源</th><th></th>
+            <th>状态</th><th>人工修订(UTC)</th><th>man−真值(s)</th><th>来源</th>
+            <th>本次定位（{{ locatePhase }}）</th><th></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="p in picks" :key="p.id"
               :class="{ missing: p.effective_source==='missing',
-                        suspect: p.raw_status==='shifted_outlier' }">
+                        suspect: p.raw_status==='shifted_outlier',
+                        excludedrow: isExcludedForLocate(p) }">
             <td>{{ p.station_code }}</td>
             <td><span class="tag" :class="p.phase">{{ p.phase }}</span></td>
             <td class="mono">{{ p.raw_time_epoch ? fmtEpoch(p.raw_time_epoch,2).slice(11) : '— 缺测 —' }}</td>
@@ -34,6 +39,12 @@
             </td>
             <td><span class="tag" :class="p.effective_source">{{ sourceLabel[p.effective_source] }}</span></td>
             <td>
+              <span v-if="p.phase !== locatePhase" class="muted">— 非本次震相 —</span>
+              <span v-else-if="p.effective_source==='missing'" class="tag missing">缺测</span>
+              <span v-else-if="isExcludedForLocate(p)" class="tag excluded">本次排除</span>
+              <span v-else class="tag good">纳入</span>
+            </td>
+            <td>
               <button v-if="p.manual_time_epoch!=null" class="sm danger" @click="$emit('clear',p.id)">
                 撤销修订
               </button>
@@ -47,9 +58,16 @@
 
 <script setup>
 import { fmtEpoch } from '../lib/api.js'
-defineProps({ picks: { type: Array, default: () => [] } })
+const props = defineProps({
+  picks: { type: Array, default: () => [] },
+  locatePhase: { type: String, default: 'P' },
+  excludedIds: { type: Array, default: () => [] },
+})
 defineEmits(['clear'])
 const sourceLabel = { raw: '原始', manual: '人工', missing: '缺测' }
+function isExcludedForLocate(p) {
+  return p.phase === props.locatePhase && props.excludedIds.includes(p.id)
+}
 function resClass(v) {
   if (v == null) return 'res-ok'
   const a = Math.abs(v)

@@ -109,6 +109,8 @@ th:first-child, td:first-child { text-align: left; }
 th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
 tr.suspect td { background: #3a1f1f; }
 tr.missing td { color: var(--muted); }
+tr.excludedrow td { color: var(--warn); background: #33280f; opacity: .92; }
+tr.excludedrow.missing td { color: var(--muted); }
 
 .tag {
   display: inline-block; padding: 0 6px; border-radius: 4px;
@@ -119,6 +121,7 @@ tr.missing td { color: var(--muted); }
 .tag.raw { color: var(--muted); }
 .tag.manual { color: var(--good); border-color: var(--good); }
 .tag.missing { color: var(--bad); border-color: var(--bad); }
+.tag.excluded { color: #1a1a1a; background: var(--warn); border-color: var(--warn); }
 .tag.bad { color: #fff; background: var(--bad); border-color: var(--bad); }
 .tag.warn { color: #1a1a1a; background: var(--warn); border-color: var(--warn); }
 .tag.good { color: #1a1a1a; background: var(--good); border-color: var(--good); }

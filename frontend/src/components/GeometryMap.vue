@@ -6,8 +6,15 @@
         <span class="tag good">绿★ 真值</span>
         <span class="tag" :class="selectedRun ? 'warn' : ''">橙◆ 所选候选</span>
         <span class="tag raw">灰◇ 其他候选</span>
-        <span class="tag P">▼ 台站</span>
+        <span class="tag good">▼ 纳入台站</span>
+        <span class="tag excluded">▼ 本次排除</span>
+        <span class="tag missing">▼ 缺测</span>
       </div>
+    </div>
+    <div class="muted" style="margin-top:-2px">
+      台站状态按<span v-if="selectedRun">所选候选解 #{{ selectedRun.id }} 的输入快照</span>
+      <span v-else>当前 {{ locatePhase }} 波定位选择</span>展示；
+      排除/缺测台站不参与该次定位。
     </div>
     <div ref="mapEl" style="height: 420px"></div>
     <div v-if="selectedRun?.geometry" class="grid2" style="margin-top:6px">
@@ -44,12 +51,45 @@ const props = defineProps({
   scenario: Object,
   runs: { type: Array, default: () => [] },
   selectedRun: Object,
+  picks: { type: Array, default: () => [] },
+  locatePhase: { type: String, default: 'P' },
+  excludedIds: { type: Array, default: () => [] },
 })
 const mapEl = ref(null)
 const gapText = { good: '包围良好', one_sided: '单侧覆盖', poor: '严重单侧' }
 
 onMounted(redraw)
-watch(() => [props.stations, props.runs, props.selectedRun], redraw, { deep: true })
+watch(() => [props.stations, props.runs, props.selectedRun, props.picks,
+             props.locatePhase, props.excludedIds], redraw, { deep: true })
+
+// 每个台站在当前查看语境下的三态：included | excluded | missing | na
+// 选中候选解时以该次运行的输入快照为准（历史可复盘）；否则按当前定位震相选择。
+function stationStatusMap() {
+  const map = new Map()
+  if (props.selectedRun?.input_snapshot?.length) {
+    for (const s of props.selectedRun.input_snapshot) {
+      if (s.time_source === 'missing') map.set(s.station_code, 'missing')
+      else if (s.excluded) map.set(s.station_code, 'excluded')
+      else map.set(s.station_code, 'included')
+    }
+    return map
+  }
+  const ex = new Set(props.excludedIds)
+  for (const p of props.picks) {
+    if (p.phase !== props.locatePhase) continue
+    if (p.effective_source === 'missing') map.set(p.station_code, 'missing')
+    else if (ex.has(p.id)) map.set(p.station_code, 'excluded')
+    else map.set(p.station_code, 'included')
+  }
+  return map
+}
+
+const STATUS_STYLE = {
+  included: { color: '#f85149', label: '纳入' },
+  excluded: { color: '#d29922', label: '本次排除' },
+  missing: { color: '#6e7681', label: '缺测' },
+  na: { color: '#8b949e', label: '非本次震相' },
+}
 
 function ellipseLonLat(run) {
   const u = run.uncertainty
@@ -72,16 +112,31 @@ function redraw() {
   if (!mapEl.value) return
   const traces = []
 
-  // 台站
-  traces.push({
-    x: props.stations.map(s => s.lon),
-    y: props.stations.map(s => s.lat),
-    text: props.stations.map(s => s.code),
-    type: 'scatter', mode: 'markers+text',
-    marker: { symbol: 'triangle-down', size: 11, color: '#f85149' },
-    textposition: 'top center', textfont: { size: 10, color: '#f85149' },
-    name: '台站', hovertemplate: '%{text}<br>(%{x:.4f}, %{y:.4f})<extra></extra>',
-  })
+  // 台站（按纳入 / 排除 / 缺测三态分开成轨迹，图例可区分）
+  const statusMap = stationStatusMap()
+  for (const key of ['included', 'excluded', 'missing', 'na']) {
+    const group = props.stations.filter(s =>
+      (statusMap.get(s.code) || 'na') === key)
+    if (!group.length) continue
+    const st = STATUS_STYLE[key]
+    traces.push({
+      x: group.map(s => s.lon),
+      y: group.map(s => s.lat),
+      text: group.map(s => `${s.code}（${st.label}${
+        props.selectedRun ? ` · 候选#${props.selectedRun.id}` : ` · ${props.locatePhase}`}）`),
+      type: 'scatter', mode: 'markers+text',
+      marker: {
+        symbol: 'triangle-down', size: key === 'excluded' ? 13 : 11,
+        color: st.color,
+        opacity: key === 'missing' ? 0.55 : 1,
+        line: key === 'excluded' ? { color: '#e3b341', width: 1.5 } :
+              { color: '#0d1117', width: 1 },
+      },
+      textposition: 'top center', textfont: { size: 10, color: st.color },
+      name: `台站·${st.label}`,
+      hovertemplate: '%{text}<br>(%{x:.4f}, %{y:.4f})<extra></extra>',
+    })
+  }
 
   // 真值
   if (props.scenario) {
@@ -95,8 +150,9 @@ function redraw() {
     })
   }
 
-  // 候选解（其他）
-  const others = props.runs.filter(r => r.locatable && r !== props.selectedRun)
+  // 候选解（其他）。选中项是详情对象、与列表摘要身份不同，按 id 去重
+  const others = props.runs.filter(
+    r => r.locatable && r.id !== props.selectedRun?.id)
   if (others.length) {
     traces.push({
       x: others.map(r => r.lon), y: others.map(r => r.lat),

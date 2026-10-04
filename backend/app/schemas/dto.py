@@ -84,6 +84,7 @@ class RunSummary(BaseModel):
     status: str
     reason: Optional[str]
     n_used: int
+    n_excluded: int
     dof: int
     lon: Optional[float]
     lat: Optional[float]

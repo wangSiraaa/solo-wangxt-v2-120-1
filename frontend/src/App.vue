@@ -58,18 +58,22 @@
       <LocationPanel
         :models="models" :runs="runs" :selected-run="selectedRun"
         :scenario-key="scenarioKey" :current-pick-version="pickVersion"
-        @located="onLocated" @select="selectedRun=$event"
+        :picks="picks" v-model:phase="locatePhase" v-model:excluded-ids="excludedIds"
+        @located="onLocated" @select="selectRun"
         @refresh-runs="loadRuns" />
 
       <div class="grid2">
         <GeometryMap :stations="scenarioStations" :scenario="scenario"
-                     :runs="runs" :selected-run="selectedRun" />
+                     :runs="runs" :selected-run="selectedRun"
+                     :picks="picks" :locate-phase="locatePhase"
+                     :excluded-ids="excludedIds" />
         <WaveformViewer :key="'wf-'+scenarioKey" :scenario-key="scenarioKey"
                         :station-codes="scenarioStations.map(s=>s.code)"
                         :picks="picks" @revised="loadPicks" />
       </div>
 
-      <PickTable :picks="picks" @clear="clearManual" />
+      <PickTable :picks="picks" :locate-phase="locatePhase"
+                 :excluded-ids="excludedIds" @clear="clearManual" />
 
       <div class="footer-note">
         P、S 震相分别独立定位，严禁混用同一残差向量；残差 = 观测到时 − 理论到时；
@@ -96,6 +100,9 @@ const picks = ref([])
 const runs = ref([])
 const selectedRun = ref(null)
 const pickVersionInfo = ref({ pick_data_version: '', n_picks: 0, n_manual: 0, n_missing: 0 })
+// 定位震相与「本次排除」的拾取 ID：仅影响下一次定位请求，不写入 raw/manual
+const locatePhase = ref('P')
+const excludedIds = ref([])
 
 const dataVersion = DATA_VERSION_CONST
 const scenario = computed(() => scenarios.value.find(s => s.key === scenarioKey.value) || null)
@@ -122,25 +129,35 @@ watch(scenarioKey, loadScenario, { immediate: true })
 
 async function loadScenario() {
   selectedRun.value = null
+  excludedIds.value = []  // 排除选择只属于当前案例的本次会话
   await Promise.all([loadPicks(), loadRuns()])
 }
 
 async function loadPicks() {
   picks.value = await api.picks(scenarioKey.value)
   pickVersionInfo.value = await api.picksVersion(scenarioKey.value)
+  // 拾取被修订/重载后，清理已不存在的排除 ID
+  const valid = new Set(picks.value.map(p => p.id))
+  excludedIds.value = excludedIds.value.filter(id => valid.has(id))
 }
 
 async function loadRuns() {
   runs.value = await api.runs(scenarioKey.value)
   if (selectedRun.value) {
+    // 列表项是摘要；仍被选中则重新取详情（含输入快照/残差，供地图三态与详情面板）
     const still = runs.value.find(r => r.id === selectedRun.value.id)
-    selectedRun.value = still || null
+    selectedRun.value = still ? await api.run(still.id) : null
   }
 }
 
 async function onLocated(created) {
   await loadRuns()
-  selectedRun.value = runs.value.find(r => r.id === created.id) || created
+  selectedRun.value = runs.value.find(r => r.id === created.id)
+    ? await api.run(created.id) : created
+}
+
+async function selectRun(summary) {
+  selectedRun.value = await api.run(summary.id)
 }
 
 async function clearManual(id) {

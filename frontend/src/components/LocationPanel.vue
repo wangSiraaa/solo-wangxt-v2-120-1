@@ -22,12 +22,60 @@
       <label style="display:flex;align-items:center;gap:4px">
         <input type="checkbox" v-model="robust" /> 稳健拟合 soft_l1
       </label>
-      <button class="primary" :disabled="busy" @click="doLocate">
-        {{ busy ? '求解中…' : '运行定位并保存候选解' }}
+      <button class="primary" :disabled="busy || includedCount<4" @click="doLocate">
+        {{ busy ? '求解中…'
+           : includedCount < 4
+             ? `运行定位（仅 ${includedCount} 个有效到时，不可定位）`
+             : '运行定位并保存候选解' }}
       </button>
       <button class="sm" @click="$emit('refresh-runs')">刷新候选列表</button>
     </div>
     <div v-if="error" class="warnbox bad" style="margin-top:8px">{{ error }}</div>
+
+    <div style="margin-top:10px">
+      <h3>本次定位使用的 {{ phase }} 到时（勾选 = 本次纳入；排除只影响本次运行，不改 raw/manual 拾取）</h3>
+      <div class="row" style="margin-bottom:4px">
+        <span class="tag good">纳入 {{ includedCount }}</span>
+        <span class="tag excluded">排除 {{ excludedCount }}</span>
+        <span class="tag missing">缺测 {{ missingCount }}</span>
+        <span v-if="phasePicks.length" class="muted">
+          <button class="sm" @click="includeAll">全部纳入</button>
+          <button class="sm" @click="excludeAllValid">排除全部有效到时</button>
+        </span>
+      </div>
+      <div v-if="includedCount < 4" class="warnbox bad">
+        只有 {{ includedCount }} 个纳入的有效 {{ phase }} 到时，少于 4 个未知量（经度/纬度/深度/发震时刻）
+        所需的最少 4 个；运行后将保存一个「不可定位」候选解，<b>不会输出坐标</b>。
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>本次纳入</th><th>台站</th><th>震相</th><th>有效到时(UTC)</th><th>来源</th><th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="p in phasePicks" :key="p.id"
+              :class="{ missing: p.effective_source==='missing', excludedrow: isExcluded(p) }">
+            <td style="text-align:left">
+              <input type="checkbox" :checked="!isExcluded(p)"
+                     :disabled="p.effective_source==='missing'"
+                     @change="toggle(p)" />
+            </td>
+            <td>{{ p.station_code }}</td>
+            <td><span class="tag" :class="p.phase">{{ p.phase }}</span></td>
+            <td class="mono">{{ p.effective_time_epoch != null
+                ? fmtEpoch(p.effective_time_epoch, 2).slice(11) : '— 缺测 —' }}</td>
+            <td><span class="tag" :class="p.effective_source">{{ sourceLabel[p.effective_source] }}</span></td>
+            <td>
+              <span v-if="p.effective_source==='missing'" class="tag missing">缺测</span>
+              <span v-else-if="isExcluded(p)" class="tag excluded">本次排除</span>
+              <span v-else-if="p.raw_status==='shifted_outlier'" class="tag bad">异常偏移·纳入</span>
+              <span v-else class="tag good">纳入</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
     <div v-if="selectedModel" style="margin-top:8px">
       <h3>{{ selectedModel.name }} 的明确假设</h3>
@@ -42,11 +90,12 @@
         <thead>
           <tr>
             <th>#</th><th>标签</th><th>震相</th><th>状态</th>
+            <th>纳入/排除</th>
             <th>经度</th><th>纬度</th><th>深度km</th><th>RMS(s)</th><th>最大残差(s)</th><th></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!runs.length"><td colspan="10" class="muted">尚无候选解，点上方按钮运行。</td></tr>
+          <tr v-if="!runs.length"><td colspan="11" class="muted">尚无候选解，点上方按钮运行。</td></tr>
           <tr v-for="r in runs" :key="r.id" class="run-pick"
               :class="{active: selectedRun?.id===r.id}" @click="$emit('select',r)">
             <td>{{ r.id }}
@@ -59,6 +108,8 @@
               <span v-if="!r.locatable" class="tag bad">不可定位</span>
               <span v-else class="tag good">已定位</span>
             </td>
+            <td>{{ r.n_used }} 个<span v-if="r.n_excluded"
+                class="tag excluded" style="margin-left:4px">排 {{ r.n_excluded }}</span></td>
             <td class="mono">{{ r.lon?.toFixed(4) ?? '—' }}</td>
             <td class="mono">{{ r.lat?.toFixed(4) ?? '—' }}</td>
             <td class="mono">{{ r.depth_km?.toFixed(2) ?? '—' }}</td>
@@ -86,7 +137,26 @@
       <div>{{ run.reason }}</div>
     </div>
 
-    <template v-else>
+    <div v-if="excludedSnapshotRows.length || missingSnapshotRows.length"
+         class="row" style="margin-top:8px">
+      <span v-if="excludedSnapshotRows.length">
+        <span class="tag excluded">本次排除 {{ excludedSnapshotRows.length }}</span>
+        <span class="muted" style="margin-left:4px">
+          {{ excludedSnapshotRows.map(r=>r.station_code).join('、') }}
+        </span>
+      </span>
+      <span v-if="missingSnapshotRows.length" style="margin-left:8px">
+        <span class="tag missing">缺测 {{ missingSnapshotRows.length }}</span>
+        <span class="muted" style="margin-left:4px">
+          {{ missingSnapshotRows.map(r=>r.station_code).join('、') }}
+        </span>
+      </span>
+      <span class="muted" style="margin-left:8px">
+        排除只作用于本次运行，raw / manual 拾取均未改动。
+      </span>
+    </div>
+
+    <template v-if="run.locatable">
       <div class="grid2">
         <dl class="kv">
           <dt>经度 / 纬度</dt>
@@ -100,7 +170,9 @@
           <dd class="mono">{{ fmtEpoch(run.origin_time_epoch,2) }} UTC
             <span v-if="run.uncertainty?.origin_time_sigma_s" class="muted">
               ±{{ run.uncertainty.origin_time_sigma_s }}s</span></dd>
-          <dt>使用到时 / 自由度</dt><dd>{{ run.n_used }} 个 / {{ run.dof }}</dd>
+          <dt>使用到时 / 自由度</dt>
+          <dd>{{ run.n_used }} 个 / {{ run.dof }}<span v-if="run.n_excluded">
+            <span class="tag excluded" style="margin-left:4px">另排除 {{ run.n_excluded }}</span></span></dd>
         </dl>
         <dl class="kv">
           <dt>RMS 残差</dt><dd>{{ run.rms_s.toFixed(3) }} s</dd>
@@ -170,16 +242,29 @@
         人工修订任一拾取都会改变「拾取数据版本」；此候选解是在上述版本下算出的，
         版本变化后应重新运行定位以便对比。输入快照保存了当时每条拾取的取值与来源。
         <details style="margin-top:4px">
-          <summary style="cursor:pointer">查看输入快照（{{ run.input_snapshot.length }} 条）</summary>
-          <div class="scroll mono" style="font-size:11px;margin-top:4px">
-            <div v-for="s in run.input_snapshot" :key="s.pick_id"
-                 :style="{color: s.excluded?'var(--bad)':(s.time_source==='missing'?'var(--muted)':'inherit')}">
-              pick#{{ s.pick_id }} {{ s.station_code }} {{ s.phase }}
-              t={{ s.effective_time_epoch?.toFixed(3) ?? 'null' }}
-              [{{ s.time_source }}{{ s.raw_status!=='ok' ? '/'+s.raw_status : '' }}]
-              {{ s.excluded ? '(用户排除)' : '' }}
-            </div>
-          </div>
+          <summary style="cursor:pointer">
+            查看输入快照（{{ run.input_snapshot.length }} 条：
+            纳入 {{ run.n_used }} · 排除 {{ run.n_excluded }} ·
+            缺测 {{ missingSnapshotRows.length }}）
+          </summary>
+          <table class="mono" style="font-size:11px;margin-top:4px">
+            <thead><tr><th>拾取</th><th>台站</th><th>震相</th><th>有效到时</th><th>来源</th><th>本次状态</th></tr></thead>
+            <tbody>
+              <tr v-for="s in run.input_snapshot" :key="s.pick_id"
+                  :class="{ excludedrow: s.excluded, missing: s.time_source==='missing' }">
+                <td>pick#{{ s.pick_id }}</td>
+                <td>{{ s.station_code }}</td>
+                <td>{{ s.phase }}</td>
+                <td>{{ s.effective_time_epoch?.toFixed(3) ?? 'null' }}</td>
+                <td>{{ s.time_source }}{{ s.raw_status!=='ok' ? '/'+s.raw_status : '' }}</td>
+                <td>
+                  <span v-if="s.excluded" class="tag excluded">用户排除</span>
+                  <span v-else-if="s.time_source==='missing'" class="tag missing">缺测</span>
+                  <span v-else class="tag good">纳入</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </details>
       </div>
     </div>
@@ -187,7 +272,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { api, fmtEpoch } from '../lib/api.js'
 
 const props = defineProps({
@@ -196,10 +281,13 @@ const props = defineProps({
   selectedRun: Object,
   scenarioKey: String,
   currentPickVersion: String,
+  picks: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['located', 'select', 'refresh-runs'])
 
-const phase = ref('P')
+const phase = defineModel('phase', { default: 'P' })
+const excludedIds = defineModel('excludedIds', { default: () => [] })
+
 const modelId = ref('homog-crust-6.0-3.46-v1')
 const robust = ref(false)
 const busy = ref(false)
@@ -207,6 +295,52 @@ const error = ref('')
 
 const run = computed(() => props.selectedRun)
 const selectedModel = computed(() => props.models.find(m => m.model_id === modelId.value))
+
+const excludedSet = computed(() => new Set(excludedIds.value))
+const phasePicks = computed(() =>
+  props.picks.filter(p => p.phase === phase.value)
+    .slice()
+    .sort((a, b) => a.station_code.localeCompare(b.station_code)))
+const includedCount = computed(() => phasePicks.value.filter(
+  p => p.effective_source !== 'missing' && !excludedSet.value.has(p.id)).length)
+const excludedCount = computed(() => phasePicks.value.filter(
+  p => p.effective_source !== 'missing' && excludedSet.value.has(p.id)).length)
+const missingCount = computed(() => phasePicks.value.filter(
+  p => p.effective_source === 'missing').length)
+
+// 详情快照中的排除/缺测行（用于三态汇总）
+const excludedSnapshotRows = computed(() =>
+  (run.value?.input_snapshot || []).filter(s => s.excluded))
+const missingSnapshotRows = computed(() =>
+  (run.value?.input_snapshot || []).filter(s =>
+    s.time_source === 'missing' && !s.excluded))
+
+const sourceLabel = { raw: '原始', manual: '人工', missing: '缺测' }
+
+function isExcluded(p) {
+  return excludedSet.value.has(p.id)
+}
+function toggle(p) {
+  const next = new Set(excludedSet.value)
+  if (next.has(p.id)) next.delete(p.id)
+  else next.add(p.id)
+  excludedIds.value = [...next]
+}
+function includeAll() {
+  excludedIds.value = excludedIds.value.filter(id =>
+    !phasePicks.value.some(p => p.id === id))
+}
+function excludeAllValid() {
+  const validIds = phasePicks.value
+    .filter(p => p.effective_source !== 'missing').map(p => p.id)
+  excludedIds.value = [...new Set([...excludedIds.value, ...validIds])]
+}
+
+// 切换震相：排除只在同一震相的拾取间有意义，自动剔除其他震相的 ID
+watch(phase, () => {
+  const ids = new Set(phasePicks.value.map(p => p.id))
+  excludedIds.value = excludedIds.value.filter(id => ids.has(id))
+})
 
 async function doLocate() {
   busy.value = true
@@ -218,6 +352,9 @@ async function doLocate() {
       model_id: modelId.value,
       robust: robust.value,
       label: '',
+      exclude_pick_ids: phasePicks.value
+        .filter(p => p.effective_source !== 'missing' && excludedSet.value.has(p.id))
+        .map(p => p.id),
     })
     emit('located', created)
   } catch (e) {
